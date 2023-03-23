@@ -112,6 +112,7 @@ pub struct Build {
     out_dir: Option<PathBuf>,
     buildmode: BuildMode,
     compiler: PathBuf,
+    ccompiler: Option<PathBuf>,
     goarch: Option<OsString>,
     goos: Option<OsString>,
     cargo_metadata: bool,
@@ -169,6 +170,7 @@ impl Build {
             out_dir: None,
             buildmode: BuildMode::CArchive,
             compiler: PathBuf::from("go"),
+            ccompiler: None,
             goarch: None,
             goos: None,
             cargo_metadata: true,
@@ -233,6 +235,17 @@ impl Build {
         self
     }
 
+    /// Configures the ccompiler to be used to produce output.
+    ///
+    /// This option is automatically determined from the target platform or a number
+    /// of environment variables, so it's not required to call this function.
+    ///
+    /// Default: Auto Detect
+    pub fn ccompiler<P: AsRef<Path>>(&mut self, ccompiler: P) -> &mut Build {
+        self.ccompiler = Some(ccompiler.as_ref().to_owned());
+        self
+    }
+
     /// Sets the `GOARCH`.
     ///
     /// This option is automatically scraped from the `CARGO_CFG_*` environment
@@ -276,12 +289,18 @@ impl Build {
             self.println(&format!("cargo:rerun-if-changed={}", file.display()));
         }
 
-        let ccompiler = cc::Build::new().try_get_compiler().map_err(|e| {
-            Error::new(
-                ErrorKind::ToolNotFound,
-                &format!("could not find c compiler: {}", e),
-            )
-        })?;
+        let ccompiler = match self.ccompiler.clone() {
+            Some(p) => p,
+            None => {
+                let tool = cc::Build::new().try_get_compiler().map_err(|e| {
+                    Error::new(
+                        ErrorKind::ToolNotFound,
+                        &format!("could not find c compiler: {}", e),
+                    )
+                })?;
+                tool.path().to_path_buf()
+            }
+        };
 
         let mut command = process::Command::new(&self.compiler);
         command.arg("build");
@@ -289,7 +308,7 @@ impl Build {
         command.args(&["-o", &out.display().to_string()]);
         command.args(self.files.iter());
         command.env("CGO_ENABLED", "1");
-        command.env("CC", ccompiler.path());
+        command.env("CC", ccompiler);
 
         let goarch = self
             .goarch
