@@ -110,6 +110,7 @@ pub struct Build {
     files: Vec<PathBuf>,
     env: HashMap<OsString, OsString>,
     out_dir: Option<PathBuf>,
+    modfile: Option<PathBuf>,
     buildmode: BuildMode,
     compiler: PathBuf,
     ccompiler: Option<PathBuf>,
@@ -168,6 +169,7 @@ impl Build {
             files: Vec::new(),
             env: HashMap::new(),
             out_dir: None,
+            modfile: None,
             buildmode: BuildMode::CArchive,
             compiler: PathBuf::from("go"),
             ccompiler: None,
@@ -175,6 +177,12 @@ impl Build {
             goos: None,
             cargo_metadata: true,
         }
+    }
+
+    /// Specify as `-modfile` argument.
+    pub fn modfile<P: AsRef<Path>>(&mut self, p: P) -> &mut Build {
+        self.modfile = Some(p.as_ref().to_path_buf());
+        self
     }
 
     /// Add a file which will be compiled
@@ -304,6 +312,9 @@ impl Build {
 
         let mut command = process::Command::new(&self.compiler);
         command.arg("build");
+        if let Some(modfile) = &self.modfile {
+            command.args(&["-modfile", &modfile.display().to_string()]);
+        }
         command.args(&["-buildmode", &self.buildmode.to_string()]);
         command.args(&["-o", &out.display().to_string()]);
         command.args(self.files.iter());
