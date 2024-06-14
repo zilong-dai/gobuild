@@ -26,6 +26,7 @@
 //! for the header.
 
 use std::collections::HashMap;
+use std::env::consts::{ARCH, OS};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -119,6 +120,8 @@ pub struct Build {
     cargo_metadata: bool,
     ldflags: Option<OsString>,
     trim_paths: bool,
+    rm_symbols: bool,
+    rm_debuginfo: bool,
 }
 
 /// Represents the types of errors that may occur.
@@ -128,6 +131,17 @@ enum ErrorKind {
     EnvVarValueUnknown,
     ToolNotFound,
     ToolExecError,
+}
+
+impl fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ErrorKind::EnvVarNotFound => write!(f, "Env var not found"),
+            ErrorKind::EnvVarValueUnknown => write!(f, "Env var value unknown"),
+            ErrorKind::ToolNotFound => write!(f, "Tool not found"),
+            ErrorKind::ToolExecError => write!(f, "Tool exec error"),
+        }
+    }
 }
 
 /// Represents an internal error that occurred, with an explanation.
@@ -150,7 +164,7 @@ impl Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
+        write!(f, "{}: {}", self.kind, self.message)
     }
 }
 
@@ -180,6 +194,8 @@ impl Build {
             cargo_metadata: true,
             ldflags: None,
             trim_paths: false,
+            rm_symbols: false,
+            rm_debuginfo: false,
         }
     }
 
@@ -303,6 +319,22 @@ impl Build {
         self
     }
 
+    /// Remove system symbols from the resulting executable.
+    ///
+    /// See the `-ldflags` flag in `go help build` for more details.
+    pub fn rm_symbols(&mut self, rm_symbols: bool) -> &mut Build {
+        self.rm_symbols = rm_symbols;
+        self
+    }
+
+    /// Remove gdb debug info from the resulting executable.
+    ///
+    /// See the `-ldflags` flag in `go help build` for more details.
+    pub fn rm_debuginfo(&mut self, rm_debuginfo: bool) -> &mut Build {
+        self.rm_debuginfo = rm_debuginfo;
+        self
+    }
+
     /// Run the compiler, generating the file `output`
     ///
     /// This will return a result instead of panicing; see compile() for the complete description.
@@ -317,15 +349,7 @@ impl Build {
 
         let ccompiler = match self.ccompiler.clone() {
             Some(p) => p,
-            None => {
-                let tool = cc::Build::new().try_get_compiler().map_err(|e| {
-                    Error::new(
-                        ErrorKind::ToolNotFound,
-                        &format!("could not find c compiler: {}", e),
-                    )
-                })?;
-                tool.path().to_path_buf()
-            }
+            None => env!("CCOMPILER").into(),
         };
 
         let mut command = process::Command::new(&self.compiler);
@@ -335,10 +359,18 @@ impl Build {
         }
         command.args(&["-buildmode", &self.buildmode.to_string()]);
         command.args(&["-o", &out.display().to_string()]);
-        if let Some(ldflags) = &self.ldflags {
-            command.arg("-ldflags");
-            command.arg(ldflags);
+
+        let mut ldflags = self.ldflags.clone().unwrap_or_default();
+        if self.rm_symbols {
+            ldflags.push(" -s");
         }
+        if self.rm_debuginfo {
+            ldflags.push(" -w");
+        }
+        if !ldflags.is_empty() {    
+            command.args(&["-ldflags", ldflags.to_str().expect("ldflages is not a valid string")]);
+        }
+        
         if self.trim_paths {
             command.arg("-trimpath");
         }
@@ -393,12 +425,7 @@ impl Build {
     fn get_out_dir(&self) -> Result<PathBuf, Error> {
         let path = match self.out_dir.clone() {
             Some(p) => p,
-            None => env::var_os("OUT_DIR").map(PathBuf::from).ok_or_else(|| {
-                Error::new(
-                    ErrorKind::EnvVarNotFound,
-                    "Environment vairable OUT_DIR not defined.",
-                )
-            })?,
+            None =>  PathBuf::from(env::var_os("OUT_DIR").unwrap_or_else(|| ".".into()))
         };
         Ok(path)
     }
@@ -422,14 +449,18 @@ impl Build {
     }
 
     fn get_goarch(&self) -> Result<OsString, Error> {
-        let arch = env::var("CARGO_CFG_TARGET_ARCH").map_err(|_| {
-            Error::new(
-                ErrorKind::EnvVarNotFound,
-                "Cannot find CARGO_CFG_TARGET_ARCH env var",
-            )
-        })?;
+        if let Ok(goarch) = env::var("GOARCH") {
+            return Ok(goarch.into());
+        }
+
+        // let arch = env::var("CARGO_CFG_TARGET_ARCH").map_err(|_| {
+        //     Error::new(
+        //         ErrorKind::EnvVarNotFound,
+        //         "Cannot find CARGO_CFG_TARGET_ARCH env var",
+        //     )
+        // })?;
         // let endian = env::var("CARGO_CFG_TARGET_ENDIAN").map_err(|_| Error::new(ErrorKind::EnvVarNotFound, "Cannot find CARGO_CFG_TARGET_ENDIAN env var"))?;
-        let goarch = match arch.as_str() {
+        let goarch = match ARCH {
             "x86" => "386",
             "x86_64" => "amd64",
             "mips" => "mips",
@@ -448,13 +479,17 @@ impl Build {
     }
 
     fn get_goos(&self) -> Result<OsString, Error> {
-        let arch = env::var("CARGO_CFG_TARGET_OS").map_err(|_| {
-            Error::new(
-                ErrorKind::EnvVarNotFound,
-                "Cannot find CARGO_CFG_TARGET_OS env var",
-            )
-        })?;
-        let goos = match arch.as_str() {
+        if let Ok(goos) = env::var("GOOS") {
+            return Ok(goos.into());
+        }
+
+        // let arch = env::var("CARGO_CFG_TARGET_OS").map_err(|_| {
+        //     Error::new(
+        //         ErrorKind::EnvVarNotFound,
+        //         "Cannot find GOOS or CARGO_CFG_TARGET_OS env var",
+        //     )
+        // })?;
+        let goos = match OS {
             "windows" => "windows",
             "macos" => "darwin",
             "ios" => "darwin",
@@ -493,7 +528,6 @@ fn run(cmd: &mut Command, program: &str) -> Result<(), Error> {
         )
     })?;
     print.join().unwrap();
-    println!("{}", status);
 
     if status.success() {
         Ok(())
@@ -535,12 +569,4 @@ fn spawn(cmd: &mut Command, program: &str) -> Result<(Child, JoinHandle<()>), Er
 fn fail(s: &str) -> ! {
     let _ = writeln!(io::stderr(), "\n\nerror occurred: {}\n\n", s);
     std::process::exit(1);
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
-    }
 }
