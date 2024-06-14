@@ -7,7 +7,7 @@ First, you'll want to both add a build script for your crate (build.rs) and also
 
 ```toml
 [build-dependencies]
-gobuild = {git = "https://github.com/zilong-dai/gobuild.git", rev = "main" }
+gobuild = {git = "https://github.com/zilong-dai/gobuild.git", branch = "main" }
 ```
 
 Next, update the `build.rs` to something like:
